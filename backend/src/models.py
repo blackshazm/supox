@@ -45,6 +45,17 @@ class User(Base):
         default=func.now(),
     )
 
+    # Default font preferences
+    default_font_family: Mapped[str] = mapped_column(
+        String(100), nullable=False, server_default=sql_text("'TikTokSans-Regular'")
+    )
+    default_font_size: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=sql_text("'24'")
+    )
+    default_font_color: Mapped[str] = mapped_column(
+        String(7), nullable=False, server_default=sql_text("'#FFFFFF'")
+    )
+
     # Additional fields for backend compatibility
     first_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     last_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)

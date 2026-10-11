@@ -57,6 +57,11 @@ SETTING_METADATA = {
         "description": "Optional, used by hosted Ollama-compatible providers.",
         "input_type": "password",
     },
+    "NVIDIA_API_KEY": {
+        "label": "NVIDIA API key",
+        "description": "Required for nvidia:* models (build.nvidia.com / NVIDIA NIM).",
+        "input_type": "password",
+    },
     "YOUTUBE_DATA_API_KEY": {
         "label": "YouTube Data API key",
         "description": "Optional metadata provider key.",

@@ -180,15 +180,22 @@ class VideoService:
         return transcript
 
     @staticmethod
-    async def analyze_transcript(transcript: str, clip_signals: Optional[str] = None) -> Any:
+    async def analyze_transcript(
+        transcript: str,
+        clip_signals: Optional[str] = None,
+        min_duration: int = 50,
+        max_duration: int = 75,
+    ) -> Any:
         """
         Analyze transcript with AI to find relevant segments.
         This is already async, no need to wrap.
         """
-        logger.info("Starting AI analysis of transcript")
+        logger.info("Starting AI analysis of transcript (min=%ds, max=%ds)", min_duration, max_duration)
         relevant_parts = await get_most_relevant_parts_by_transcript(
             transcript,
             clip_signals=clip_signals,
+            min_duration=min_duration,
+            max_duration=max_duration,
         )
         logger.info(
             f"AI analysis complete: {len(relevant_parts.most_relevant_segments)} segments found"
@@ -336,6 +343,10 @@ class VideoService:
                 "shareability_score": segment.get("shareability_score", 0),
                 "hook_type": segment.get("hook_type"),
                 "hook_title": segment.get("hook_title"),
+                "series_id": segment.get("series_id"),
+                "part_number": segment.get("part_number", 1),
+                "total_parts": segment.get("total_parts", 1),
+                "series_title": segment.get("series_title"),
                 "keep_ranges": keep_ranges,
             }
         except Exception as e:
@@ -386,6 +397,8 @@ class VideoService:
         cached_analysis_json: Optional[str] = None,
         progress_callback: Optional[Callable[[int, str, str], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], Awaitable[bool]]] = None,
+        min_duration: int = 50,
+        max_duration: int = 75,
     ) -> Dict[str, Any]:
         """
         Complete video processing pipeline.
@@ -509,6 +522,8 @@ class VideoService:
                 relevant_parts = await VideoService.analyze_transcript(
                     transcript,
                     clip_signals=clip_signals,
+                    min_duration=min_duration,
+                    max_duration=max_duration,
                 )
 
             # Step 4: Create clips
@@ -539,6 +554,10 @@ class VideoService:
                         "shareability_score": virality.get("shareability_score", 0),
                         "hook_type": virality.get("hook_type"),
                         "hook_title": segment.get("hook_title"),
+                        "series_id": segment.get("series_id"),
+                        "part_number": segment.get("part_number", 1),
+                        "total_parts": segment.get("total_parts", 1),
+                        "series_title": segment.get("series_title"),
                     }
                 else:
                     virality = segment.virality.model_dump() if segment.virality else {}
@@ -555,6 +574,10 @@ class VideoService:
                         "shareability_score": virality.get("shareability_score", 0),
                         "hook_type": virality.get("hook_type"),
                         "hook_title": getattr(segment, "hook_title", None),
+                        "series_id": getattr(segment, "series_id", None),
+                        "part_number": getattr(segment, "part_number", 1),
+                        "total_parts": getattr(segment, "total_parts", 1),
+                        "series_title": getattr(segment, "series_title", None),
                     }
 
                 segment_payload["text"] = VideoService._ground_segment_text(
@@ -562,6 +585,35 @@ class VideoService:
                     transcript_data,
                 )
                 segments_json.append(segment_payload)
+
+            # Validação anti-alucinação de tempo e filtro anti-jabá comercial
+            filtered_segments = []
+            for seg in segments_json:
+                st = seg.get("start_time", 0.0)
+                try:
+                    if isinstance(st, str) and ":" in st:
+                        m, s = st.split(":", 1)
+                        st_secs = float(m) * 60 + float(s)
+                    else:
+                        st_secs = float(st or 0.0)
+                except Exception:
+                    st_secs = 0.0
+
+                # Rejeita timestamps fora da duração real do arquivo
+                if file_duration > 0 and st_secs >= file_duration:
+                    logger.warning("Descartando segmento com start_time %.1fs acima da duração do vídeo (%.1fs)", st_secs, file_duration)
+                    continue
+
+                # Filtro anti-jabá: descarta anúncios nos primeiros 240s
+                text_lower = (seg.get("text") or "").lower()
+                commercial_words = ["cupom", "patrocinador", "parceiro", "apoio", "merchan", "link na descrição", "superchat", "manda o pix", "desconto de"]
+                if st_secs < 240 and any(w in text_lower for w in commercial_words):
+                    logger.info("Descartando segmento aos %.1fs devido a menção comercial/jabá", st_secs)
+                    continue
+
+                filtered_segments.append(seg)
+
+            segments_json = filtered_segments
 
             if processing_mode == "fast":
                 segments_json = segments_json[: runtime_config.fast_mode_max_clips]

@@ -18,10 +18,20 @@ class Config:
         self.youtube_data_api_key = self._get_runtime_setting("YOUTUBE_DATA_API_KEY")
         self.ollama_base_url = self._get_runtime_setting("OLLAMA_BASE_URL")
         self.ollama_api_key = self._get_runtime_setting("OLLAMA_API_KEY")
+        self.openrouter_api_key = self._get_runtime_setting("OPENROUTER_API_KEY")
+        self.openrouter_default_model = os.getenv("OPENROUTER_DEFAULT_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+        self.groq_api_key = self._get_runtime_setting("GROQ_API_KEY")
+        self.zai_api_key = self._get_runtime_setting("ZAI_API_KEY")
+        self.nvidia_api_key = self._get_runtime_setting("NVIDIA_API_KEY") or os.getenv("NV_API_KEY")
+        self.nvidia_base_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+        self.nvidia_default_model = os.getenv("NVIDIA_DEFAULT_MODEL", "moonshotai/kimi-k2.5")
 
-        self.whisper_model = os.getenv("WHISPER_MODEL") or os.getenv("WHISPER_MODEL_SIZE", "base")
+        self.whisper_model = os.getenv("WHISPER_MODEL") or os.getenv("WHISPER_MODEL_SIZE", "small")
+        self.whisper_use_faster = self._get_bool_env("WHISPER_USE_FASTER", True)
+        self.whisper_device = os.getenv("WHISPER_DEVICE", "auto")
+        self.whisper_compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
         self.transcription_provider = self._normalize_transcription_provider(
-            os.getenv("TRANSCRIPTION_PROVIDER", "assemblyai")
+            os.getenv("TRANSCRIPTION_PROVIDER", "whisper" if not os.getenv("ASSEMBLY_AI_API_KEY") else "assemblyai")
         )
         self.llm = self._get_runtime_setting("LLM") or self._infer_default_llm()
         self.assembly_ai_api_key = self._get_runtime_setting("ASSEMBLY_AI_API_KEY")
@@ -121,7 +131,7 @@ class Config:
         self.discord_feedback_webhook_url = self._get_optional_env("DISCORD_FEEDBACK_WEBHOOK_URL")
         self.discord_sales_webhook_url = self._get_optional_env("DISCORD_SALES_WEBHOOK_URL")
         self.default_processing_mode = os.getenv("DEFAULT_PROCESSING_MODE", "fast")
-        self.fast_mode_max_clips = int(os.getenv("FAST_MODE_MAX_CLIPS", "4"))
+        self.fast_mode_max_clips = int(os.getenv("FAST_MODE_MAX_CLIPS", "30"))
         self.fast_mode_transcript_model = os.getenv(
             "FAST_MODE_TRANSCRIPT_MODEL", "universal"
         )
@@ -163,6 +173,9 @@ class Config:
             "OPENAI_API_KEY": self.openai_api_key,
             "GOOGLE_API_KEY": self.google_api_key,
             "ANTHROPIC_API_KEY": self.anthropic_api_key,
+            "OPENROUTER_API_KEY": self.openrouter_api_key,
+            "GROQ_API_KEY": self.groq_api_key,
+            "ZAI_API_KEY": self.zai_api_key,
             "OLLAMA_BASE_URL": self.ollama_base_url,
             "OLLAMA_API_KEY": self.ollama_api_key,
             "YOUTUBE_DATA_API_KEY": self.youtube_data_api_key,
@@ -221,6 +234,10 @@ class Config:
         return self.youtube_data_api_key or self.google_api_key
 
     def resolve_ollama_base_url(self) -> str:
+        # Se estiver rodando fora do container Docker e a URL apontar para host.docker.internal,
+        # faz fallback para localhost evitando falhas de conexao no Windows host
+        if not os.path.exists("/.dockerenv") and self.ollama_base_url and "host.docker.internal" in self.ollama_base_url:
+            return LOCAL_OLLAMA_BASE_URL
         return self.ollama_base_url or self._default_ollama_base_url()
 
     @staticmethod
@@ -234,12 +251,20 @@ class Config:
         Infer a usable default model based on whichever API key is present.
         Falls back to Google for backward compatibility.
         """
+        if self.nvidia_api_key:
+            return f"nvidia:{self.nvidia_default_model}"
+        if self.openrouter_api_key:
+            return f"openrouter:{self.openrouter_default_model}"
         if self.google_api_key:
             return "google-gla:gemini-3-flash-preview"
         if self.openai_api_key:
-            return "openai:gpt-5.2"
+            return "openai:gpt-4o"
         if self.anthropic_api_key:
-            return "anthropic:claude-4-sonnet"
+            return "anthropic:claude-3-5-sonnet"
+        if self.zai_api_key:
+            return "zai:glm-4.7"
+        if self.groq_api_key:
+            return "groq:llama-3.3-70b-versatile"
         return "google-gla:gemini-3-flash-preview"
 
 

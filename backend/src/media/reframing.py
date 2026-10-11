@@ -1193,7 +1193,7 @@ def build_vertical_filter_plan(
         x_expr = build_smooth_pan_expression(keys)
         crop_chain = (
             f"crop={crop_w}:{crop_h}:x='{x_expr}':y=0,"
-            "scale=1080:1920:flags=lanczos,setsar=1"
+            "scale=1080:1920:flags=lanczos,unsharp=3:3:0.6:3:3:0.0,setsar=1"
         )
     else:
         if keys:
@@ -1204,7 +1204,7 @@ def build_vertical_filter_plan(
             sx, _, _, _ = detect_optimal_crop_region(input_path, 0, min(duration, 12.0))
             static_x = clamp_even(sx, 0, max(0, width - crop_w))
         crop_chain = (
-            f"crop={crop_w}:{crop_h}:{static_x}:0,scale=1080:1920:flags=lanczos,setsar=1"
+            f"crop={crop_w}:{crop_h}:{static_x}:0,scale=1080:1920:flags=lanczos,unsharp=3:3:0.6:3:3:0.0,setsar=1"
         )
 
     # Decide the layout over time. All-face clips skip the compositor (cheaper).
@@ -1300,7 +1300,7 @@ def render_reframed_clip_ffmpeg(
     if plan and plan["mode"] == "pan":
         video_filter = (
             f"crop={plan['crop_w']}:{plan['crop_h']}:x='{plan['x_expression']}':y=0,"
-            "scale=1080:1920:flags=lanczos,setsar=1"
+            "scale=1080:1920:flags=lanczos,unsharp=3:3:0.6:3:3:0.0,setsar=1"
         )
         if subs:
             video_filter = f"{video_filter},{subs}"

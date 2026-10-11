@@ -16,3 +16,8 @@ frontend/test-results/
 backend/demo_clips/
 backend/demo_clips_*.log
 backend/run_demo.py
+
+# Local scripts with keys and docker overrides
+iniciar-*.ps1
+docker-compose.override.yml
+

@@ -7,25 +7,40 @@ from typing import List, Dict, Any, Optional, Literal
 import asyncio
 import logging
 import re
+import os
 
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
-from pydantic_ai.models.ollama import OllamaModel
-from pydantic_ai.providers.ollama import OllamaProvider
+try:
+    from pydantic_ai.models.ollama import OllamaModel
+    from pydantic_ai.providers.ollama import OllamaProvider
+except ImportError:
+    OllamaModel = None
+from pydantic_ai.models.openai import OpenAIModel
+try:
+    from pydantic_ai.providers.openai import OpenAIProvider
+except ImportError:
+    OpenAIProvider = None
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from .config import Config, get_config
 from .runtime_settings import apply_settings_to_process_env
+from .services.openrouter_llm import OpenRouterService
+from .services.zai_llm import ZAILLMService
+from .services.groq_llm import GroqLLMService
+from .services.ollama_llm import OllamaLLMService
+from .services.nvidia_llm import NVIDIALLMService
+import json
 
 logger = logging.getLogger(__name__)
 
-IDEAL_CLIP_MIN_SECONDS = 25
-IDEAL_CLIP_MAX_SECONDS = 50
-MIN_ACCEPTED_CLIP_SECONDS = 15
-MAX_ACCEPTED_CLIP_SECONDS = 60
-TRANSCRIPT_ANALYSIS_CACHE_VERSION = "hook-titles-v5-grounded"
-HOOK_TITLE_MAX_CHARS = 64
-HOOK_TITLE_MAX_WORDS = 10
+IDEAL_CLIP_MIN_SECONDS = int(os.getenv("IDEAL_CLIP_MIN_SECONDS", "50"))
+IDEAL_CLIP_MAX_SECONDS = int(os.getenv("IDEAL_CLIP_MAX_SECONDS", "75"))
+MIN_ACCEPTED_CLIP_SECONDS = int(os.getenv("MIN_ACCEPTED_CLIP_SECONDS", "45"))
+MAX_ACCEPTED_CLIP_SECONDS = int(os.getenv("MAX_ACCEPTED_CLIP_SECONDS", "95"))
+TRANSCRIPT_ANALYSIS_CACHE_VERSION = "hook-titles-v6-dense-series"
+HOOK_TITLE_MAX_CHARS = 75
+HOOK_TITLE_MAX_WORDS = 12
 TRANSCRIPT_SPAN_RE = re.compile(
     r"^\[(?P<start>\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*"
     r"(?P<end>\d{1,2}:\d{2}(?::\d{2})?)\]\s*(?P<text>.*)$"
@@ -163,6 +178,22 @@ class TranscriptSegment(BaseModel):
             "the segment content, no hashtags, no emojis, no surrounding quotes."
         ),
     )
+    series_id: Optional[str] = Field(
+        default=None,
+        description="Optional identifier linking multiple parts of the same long topic (e.g. serie-1)"
+    )
+    part_number: int = Field(
+        default=1,
+        description="Part index within the series (1, 2, or 3)"
+    )
+    total_parts: int = Field(
+        default=1,
+        description="Total number of parts in this series (1, 2, or 3)"
+    )
+    series_title: Optional[str] = Field(
+        default=None,
+        description="Common title or theme of the multi-part series"
+    )
 
     @field_validator("relevance_score", mode="before")
     @classmethod
@@ -236,7 +267,9 @@ OUTPUT CONTRACT:
 - Each item in "most_relevant_segments" must include: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", and "hook_title".
 - Do not use "segment" as an output field. Use "text".
 - "virality" must include: "hook_score", "engagement_score", "value_score", "shareability_score", "total_score", "hook_type", and "virality_reasoning".
-- Every returned segment must be 15-60 seconds long. Prefer 25-50 seconds.
+- Every returned segment must be 50-75 seconds long (allowing up to 90s for deep stories). Segments shorter than 45 seconds are strictly forbidden.
+- 3-ACT NARRATIVE STRUCTURE: Each clip must contain a complete thought with (1) Strong Hook (0-7s) that triggers curiosity, (2) Contextual story/argument with tension (8-45s), and (3) Payoff, punchline, or clear conclusion (46s+). Never cut off mid-thought.
+- MULTI-PART SERIES ("PARTE 1, 2, 3"): When a high-value debate or story spans 1m30s to 3 minutes, DO NOT discard it or pick an incomplete 30s fragment. Split it into 2 or 3 contiguous segments of 50-70s each. Set the same "series_id" on them, set "part_number" (1, 2, 3), "total_parts" (2 or 3), and prefix "hook_title" with "[Parte 1/2]" or "[Parte 1/3]". Part 1 ends on suspense/tension, Part 2 delivers the climax, Part 3 delivers the payoff.
 
 CORE OBJECTIVES:
 1. Identify segments that would be compelling on social media platforms
@@ -328,25 +361,22 @@ Identify 2-4 moments in each segment where B-roll footage could enhance the vide
 - Use simple, searchable keywords (e.g., "coffee shop", "laptop coding", "money stack")
 
 TIMING GUIDELINES:
-- Target 25-50 seconds for most clips
-- Use 15-24 seconds only when the moment is exceptionally dense, self-contained, and complete
-- CRITICAL: start_time MUST be different from end_time (minimum 15 seconds apart)
-- Focus on natural content boundaries rather than arbitrary time limits
-- Include enough context for the segment to be understandable
-- Prefer roughly 30-50 seconds when possible
-- Start at the hook or the minimum setup needed to make the hook land, and end after the payoff
-- If a highlight is only one good line, expand to include the surrounding setup and payoff rather than returning a tiny fragment
-- Stop expanding when the topic drifts, the speaker repeats the same point, or the clip loses momentum
+- Target 50-75 seconds for all clips (allowing up to 90s for deep stories).
+- Segments shorter than 45 seconds are STRICTLY FORBIDDEN.
+- CRITICAL: start_time MUST be different from end_time (minimum 45 seconds apart, ideally 50-75 seconds).
+- Focus on natural content boundaries with complete 3-act narrative structure: (1) Strong Hook, (2) Story/Argument with tension, (3) Payoff/Punchline.
+- Prefer roughly 50-75 seconds whenever possible.
+- If a highlight is short, expand to include the full surrounding setup, context, and complete conclusion.
+- For longer discussions (1m30s to 3m), split into Multi-Part Series (Parte 1, 2, 3) of 50-70 seconds each.
 
 TIMESTAMP REQUIREMENTS - EXTREMELY IMPORTANT:
 - Use EXACT timestamps as they appear in the transcript
 - Never modify timestamp format (keep MM:SS structure)
 - start_time MUST be LESS THAN end_time (start_time < end_time)
-- MINIMUM segment duration: 15 seconds (end_time - start_time >= 15 seconds)
-- IDEAL segment duration: 25-50 seconds
-- Look at transcript ranges like [02:25 - 02:35] and use different start/end times
-- NEVER use the same timestamp for both start_time and end_time
-- Example: start_time: "02:25", end_time: "02:35" (NOT "02:25" and "02:25")
+- MINIMUM segment duration: 45 seconds (end_time - start_time >= 45 seconds)
+- IDEAL segment duration: 50-75 seconds
+- NEVER pick segments shorter than 45 seconds (e.g. 15-30s fragments are invalid)
+- Example: start_time: "02:00", end_time: "03:00" (60 seconds)
 
 SCORING AND OUTPUT RULES:
 - relevance_score should reflect how well the segment works as a standalone short clip, not just whether the topic is generally important
@@ -360,7 +390,7 @@ Find 2-5 compelling segments that would work well as standalone clips. Quality o
 _transcript_agent: Optional[Agent[None, TranscriptAnalysis]] = None
 _transcript_agent_signature: Optional[tuple[str | None, ...]] = None
 
-SUPPORTED_LLM_PROVIDERS = {"google", "google-gla", "openai", "anthropic", "ollama"}
+SUPPORTED_LLM_PROVIDERS = {"google", "google-gla", "openai", "anthropic", "ollama", "openrouter", "zai", "groq", "nvidia"}
 
 
 def _split_llm_name(model_name: str) -> tuple[str, str | None]:
@@ -378,7 +408,7 @@ def _get_missing_llm_key_error(model_name: str, runtime_config: Config) -> Optio
     if provider not in SUPPORTED_LLM_PROVIDERS:
         return (
             f"Unsupported LLM provider '{provider}'. "
-            "Use google-gla:*, openai:*, anthropic:*, or ollama:*."
+            "Use google-gla:*, openai:*, anthropic:*, ollama:*, openrouter:*, zai:*, groq:*, or nvidia:*."
         )
 
     if not provider_model_name:
@@ -405,6 +435,30 @@ def _get_missing_llm_key_error(model_name: str, runtime_config: Config) -> Optio
             "Set ANTHROPIC_API_KEY or choose another provider with a matching API key."
         )
 
+    if provider == "openrouter" and not runtime_config.openrouter_api_key:
+        return (
+            "Selected LLM provider is OpenRouter, but OPENROUTER_API_KEY is not set. "
+            "Set OPENROUTER_API_KEY or choose another provider with a matching API key."
+        )
+
+    if provider == "zai" and not runtime_config.zai_api_key:
+        return (
+            "Selected LLM provider is Z.AI, but ZAI_API_KEY is not set. "
+            "Set ZAI_API_KEY or choose another provider with a matching API key."
+        )
+
+    if provider == "groq" and not runtime_config.groq_api_key:
+        return (
+            "Selected LLM provider is Groq, but GROQ_API_KEY is not set. "
+            "Set GROQ_API_KEY or choose another provider with a matching API key."
+        )
+
+    if provider == "nvidia" and not runtime_config.nvidia_api_key:
+        return (
+            "Selected LLM provider is NVIDIA, but NVIDIA_API_KEY is not set. "
+            "Set NVIDIA_API_KEY (from build.nvidia.com) or choose another provider with a matching API key."
+        )
+
     if provider == "ollama":
         # Ollama can run locally without an API key. OLLAMA_BASE_URL/OLLAMA_API_KEY
         # are optional and passed through as environment variables.
@@ -415,6 +469,22 @@ def _get_missing_llm_key_error(model_name: str, runtime_config: Config) -> Optio
 
 def _build_transcript_model(runtime_config: Config) -> Model | str:
     provider, provider_model_name = _split_llm_name(runtime_config.llm)
+    if provider == "nvidia":
+        model_name = provider_model_name or runtime_config.nvidia_default_model
+        if OpenAIProvider:
+            return OpenAIModel(
+                model_name,
+                provider=OpenAIProvider(
+                    base_url=runtime_config.nvidia_base_url,
+                    api_key=runtime_config.nvidia_api_key,
+                ),
+            )
+        return OpenAIModel(
+            model_name,
+            base_url=runtime_config.nvidia_base_url,
+            api_key=runtime_config.nvidia_api_key,
+        )
+
     if provider != "ollama":
         return runtime_config.llm
 
@@ -424,12 +494,26 @@ def _build_transcript_model(runtime_config: Config) -> Model | str:
             "Use the format ollama:<model>, for example ollama:gpt-oss:20b."
         )
 
-    return OllamaModel(
+    if OllamaModel and OllamaProvider:
+        return OllamaModel(
+            provider_model_name,
+            provider=OllamaProvider(
+                base_url=runtime_config.resolve_ollama_base_url(),
+                api_key=runtime_config.ollama_api_key,
+            ),
+        )
+    if OpenAIProvider:
+        return OpenAIModel(
+            provider_model_name,
+            provider=OpenAIProvider(
+                base_url=runtime_config.resolve_ollama_base_url(),
+                api_key=runtime_config.ollama_api_key or "ollama",
+            ),
+        )
+    return OpenAIModel(
         provider_model_name,
-        provider=OllamaProvider(
-            base_url=runtime_config.resolve_ollama_base_url(),
-            api_key=runtime_config.ollama_api_key,
-        ),
+        base_url=runtime_config.resolve_ollama_base_url(),
+        api_key=runtime_config.ollama_api_key or "ollama",
     )
 
 
@@ -445,6 +529,7 @@ def get_transcript_agent() -> Agent[None, TranscriptAnalysis]:
         runtime_config.anthropic_api_key,
         runtime_config.ollama_base_url,
         runtime_config.ollama_api_key,
+        runtime_config.nvidia_api_key,
     )
     if _transcript_agent is None or _transcript_agent_signature != signature:
         apply_settings_to_process_env(runtime_config.as_runtime_settings())
@@ -466,7 +551,11 @@ def get_transcript_agent() -> Agent[None, TranscriptAnalysis]:
 
 
 def build_transcript_analysis_prompt(
-    transcript: str, include_broll: bool = False, clip_signals: str | None = None
+    transcript: str,
+    include_broll: bool = False,
+    clip_signals: str | None = None,
+    min_duration: int = 50,
+    max_duration: int = 75,
 ) -> str:
     """Build the grounded task prompt for transcript analysis."""
     broll_instruction = ""
@@ -496,10 +585,11 @@ Follow this workflow:
 4. For each chosen segment, use the earliest timestamp in the selected range as start_time and the latest timestamp in the selected range as end_time.{broll_instruction}
 
 Selection target:
-- Choose 2-5 segments total.
-- Most selected clips should be 25-50 seconds.
-- Only choose a 15-24 second clip when it already contains a full setup and payoff.
-- If a strong moment is shorter than 25 seconds, first try expanding to nearby contiguous transcript lines that add useful context.
+- Choose 3-8 segments total.
+- Most selected clips should be {min_duration}-{max_duration} seconds (allowing up to {max_duration + 20} seconds for deep storytelling).
+- NEVER choose clips shorter than 45 seconds (they lack sufficient depth and context for podcast conversations).
+- 3-ACT NARRATIVE (MANDATORY): Each clip MUST contain: (1) Strong Hook (0-7s) with immediate curiosity or tension; (2) Story development and context (8-45s); (3) Climax, punchline, or clear resolution (46s+). Never cut mid-thought.
+- MULTI-PART SERIES ("PARTE 1, 2, 3"): If a great story or debate spans 1m30s to 3 minutes, DO NOT discard it or pick an incomplete fragment. Slice it into 2 or 3 contiguous connected segments (50-70 seconds each). For each part in the series: set the same "series_id" (e.g. "serie-1"), "part_number" (1, 2, or 3), "total_parts" (2 or 3), and start "hook_title" with "[Parte 1/2]" or "[Parte 1/3]".
 - Skip weak standalone picks: intros, sponsor reads, CTAs, contextless quotes, repeated points, vague setup, and answer fragments that require prior context.
 - Before returning a segment, ask whether a viewer would understand and care without seeing the rest of the source video.
 
@@ -517,10 +607,10 @@ JSON-only output requirements:
 - Return one valid JSON object and nothing else.
 - No Markdown, headings, bullets, code fences, or explanatory text outside JSON.
 - Top-level keys: "most_relevant_segments", "summary", "key_topics"{', "broll_opportunities"' if include_broll else ''}.
-- Segment keys: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", "hook_title".
-- "hook_title" is a 3-9 word plain-text headline for the clip, grounded in the segment (no hashtags, emojis, or quotes).
+- Segment keys: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", "hook_title", "series_id", "part_number", "total_parts".
+- "hook_title" is a 3-10 word plain-text headline for the clip (e.g. "[Parte 1/2] Revelação surpreendente").
 - Virality keys: "hook_score", "engagement_score", "value_score", "shareability_score", "total_score", "hook_type", "virality_reasoning".
-- Do not return segments shorter than {MIN_ACCEPTED_CLIP_SECONDS} seconds or longer than {MAX_ACCEPTED_CLIP_SECONDS} seconds.
+- Do not return segments shorter than 45 seconds or longer than 100 seconds.
 
 Transcript:
 {transcript}"""
@@ -707,26 +797,379 @@ def _repair_segment_bounds(
 
 
 async def get_most_relevant_parts_by_transcript(
-    transcript: str, include_broll: bool = False, clip_signals: str | None = None
+    transcript: str,
+    include_broll: bool = False,
+    clip_signals: str | None = None,
+    video_duration_seconds: float = 0.0,
+    min_duration: int = 50,
+    max_duration: int = 75,
 ) -> TranscriptAnalysis:
     """Get the most relevant parts of a transcript with virality scoring and optional B-roll detection."""
     logger.info(
-        f"Starting AI analysis of transcript ({len(transcript)} chars), include_broll={include_broll}"
+        f"Starting AI analysis of transcript ({len(transcript)} chars), include_broll={include_broll}, min={min_duration}s, max={max_duration}s, video_duration={video_duration_seconds}s"
     )
 
     try:
-        agent = get_transcript_agent()
-        transcript_lines = _parse_transcript_lines(transcript)
+        runtime_config = get_config()
+        provider = runtime_config.llm.split(":", 1)[0].strip().lower() if ":" in runtime_config.llm else runtime_config.llm.strip().lower()
 
-        result = await agent.run(
-            build_transcript_analysis_prompt(
-                transcript=transcript,
-                include_broll=include_broll,
-                clip_signals=clip_signals,
+        if provider == "openrouter":
+            model = runtime_config.llm.split(":", 1)[1].strip() if ":" in runtime_config.llm else None
+            openrouter_service = OpenRouterService(
+                runtime_config.openrouter_api_key,
+                default_model=runtime_config.openrouter_default_model,
             )
-        )
+            metadata = {
+                "duration": video_duration_seconds if video_duration_seconds > 0 else (len(transcript.split()) / 2),
+                "title": "Video Content Analysis",
+            }
+            logger.info("Using OpenRouter provider, model=%s, duration=%.1fs", model, metadata["duration"])
+            raw_result = await openrouter_service.analyze_video_content(transcript, metadata, model=model)
+            
+            segments = []
+            for item in raw_result.get("clips", []):
+                start_s = item.get("start_time")
+                end_s = item.get("end_time")
+                
+                def _fmt(s):
+                    if not s:
+                        return "00:00"
+                    if isinstance(s, (int, float)):
+                        m = int(s) // 60
+                        sec = int(s) % 60
+                        return f"{m:02d}:{sec:02d}"
+                    s = str(s).strip()
+                    if " - " in s:
+                        s = s.split(" - ")[0].strip()
+                    elif "-" in s and ":" in s:
+                        s = s.split("-")[0].strip()
+                    if s.count(":") == 2:
+                        parts = s.split(":")
+                        try:
+                            h, m, sec = int(parts[0]), int(parts[1]), int(parts[2].split(".")[0])
+                            return f"{h * 60 + m:02d}:{sec:02d}"
+                        except Exception:
+                            return s
+                    if s.count(":") == 1:
+                        parts = s.split(":")
+                        try:
+                            return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+                        except Exception:
+                            return s
+                    return s
+                
+                try:
+                    v_raw = float(item.get("virality_score") or item.get("score") or 0.7)
+                except (ValueError, TypeError):
+                    v_raw = 0.7
+                if v_raw > 1.0:
+                    rel_score = min(max(v_raw / 100.0, 0.0), 1.0)
+                    tot_score = int(min(max(v_raw, 0), 100))
+                else:
+                    rel_score = min(max(v_raw, 0.0), 1.0)
+                    tot_score = int(min(max(v_raw * 100, 0), 100))
+                part_score = int(min(max(tot_score / 4, 0), 25))
 
-        analysis = result.output
+                hook_t = item.get("hook_title") or item.get("title") or item.get("hook_text") or "Clip headline"
+                series_id = item.get("series_id")
+                try:
+                    part_num = int(item.get("part_number") or 1)
+                except (ValueError, TypeError):
+                    part_num = 1
+                try:
+                    tot_parts = int(item.get("total_parts") or 1)
+                except (ValueError, TypeError):
+                    tot_parts = 1
+
+                if not series_id and hook_t:
+                    p_match = re.search(r'\[Parte\s*(\d+)/(\d+)\]', str(hook_t), re.IGNORECASE)
+                    if p_match:
+                        series_id = f"series-auto-{start_s}"
+                        part_num = int(p_match.group(1))
+                        tot_parts = int(p_match.group(2))
+
+                segments.append(TranscriptSegment(
+                    start_time=_fmt(start_s),
+                    end_time=_fmt(end_s),
+                    text=item.get("hook_text", "") or "Clip moment",
+                    relevance_score=rel_score,
+                    reasoning=item.get("why_viral", "") or "High engagement potential",
+                    virality=ViralityAnalysis(
+                        hook_score=part_score,
+                        engagement_score=part_score,
+                        value_score=part_score,
+                        shareability_score=part_score,
+                        total_score=tot_score,
+                        virality_reasoning=item.get("why_viral", "") or "High engagement potential"
+                    ),
+                    hook_title=sanitize_hook_title(hook_t),
+                    series_id=series_id,
+                    part_number=part_num,
+                    total_parts=tot_parts,
+                    series_title=item.get("series_title"),
+                ))
+            
+            analysis = TranscriptAnalysis(
+                most_relevant_segments=segments,
+                summary=raw_result.get("summary", ""),
+                key_topics=raw_result.get("suggested_hashtags", [])
+            )
+        elif provider == "zai":
+            model = runtime_config.llm.split(":", 1)[1].strip() if ":" in runtime_config.llm else None
+            zai_service = ZAILLMService(
+                runtime_config.zai_api_key,
+                default_model=model,
+            )
+            metadata = {
+                "duration": video_duration_seconds if video_duration_seconds > 0 else (len(transcript.split()) / 2),
+                "title": "Video Content Analysis",
+            }
+            logger.info("Using Z.AI provider, model=%s", model)
+            raw_result = await zai_service.analyze_video_content(transcript, metadata, model=model)
+            
+            segments = []
+            for item in raw_result.get("clips", []):
+                start_s = item.get("start_time")
+                end_s = item.get("end_time")
+                
+                def _fmt(s):
+                    if isinstance(s, (int, float)):
+                        m = int(s) // 60
+                        sec = int(s) % 60
+                        return f"{m:02d}:{sec:02d}"
+                    return str(s).strip()
+                
+                segments.append(TranscriptSegment(
+                    start_time=_fmt(start_s),
+                    end_time=_fmt(end_s),
+                    text=item.get("hook_text", "") or "Clip segment",
+                    relevance_score=item.get("virality_score", 0.5),
+                    reasoning=item.get("why_viral", ""),
+                    virality=ViralityAnalysis(
+                        hook_score=int(item.get("virality_score", 0) * 25),
+                        engagement_score=int(item.get("virality_score", 0) * 25),
+                        value_score=int(item.get("virality_score", 0) * 25),
+                        shareability_score=int(item.get("virality_score", 0) * 25),
+                        total_score=int(item.get("virality_score", 0) * 100),
+                        virality_reasoning=item.get("why_viral", "")
+                    )
+                ))
+            analysis = TranscriptAnalysis(
+                most_relevant_segments=segments,
+                summary=raw_result.get("summary", ""),
+                key_topics=raw_result.get("suggested_hashtags", [])
+            )
+        elif provider == "groq":
+            model = runtime_config.llm.split(":", 1)[1].strip() if ":" in runtime_config.llm else None
+            groq_service = GroqLLMService(
+                runtime_config.groq_api_key,
+                default_model=model,
+            )
+            metadata = {
+                "duration": video_duration_seconds if video_duration_seconds > 0 else (len(transcript.split()) / 2),
+                "title": "Video Content Analysis",
+            }
+            logger.info("Using Groq provider, model=%s", model)
+            raw_result = await groq_service.analyze_video_content(transcript, metadata, model=model)
+            
+            segments = []
+            for item in raw_result.get("clips", []):
+                start_s = item.get("start_time")
+                end_s = item.get("end_time")
+                
+                def _fmt(s):
+                    if isinstance(s, (int, float)):
+                        m = int(s) // 60
+                        sec = int(s) % 60
+                        return f"{m:02d}:{sec:02d}"
+                    s = str(s).strip()
+                    if s.count(":") == 2 and s.endswith(":00"):
+                        parts = s.split(":")
+                        if int(parts[0]) < 60:
+                            return f"{parts[0]}:{parts[1]}"
+                    return s
+                
+                segments.append(TranscriptSegment(
+                    start_time=_fmt(start_s),
+                    end_time=_fmt(end_s),
+                    text=item.get("hook_text", "") or "Clip moment",
+                    relevance_score=item.get("virality_score", 0.5),
+                    reasoning=item.get("why_viral", ""),
+                    virality=ViralityAnalysis(
+                        hook_score=int(item.get("virality_score", 0) * 25),
+                        engagement_score=int(item.get("virality_score", 0) * 25),
+                        value_score=int(item.get("virality_score", 0) * 25),
+                        shareability_score=int(item.get("virality_score", 0) * 25),
+                        total_score=int(item.get("virality_score", 0) * 100),
+                        virality_reasoning=item.get("why_viral", "")
+                    )
+                ))
+            analysis = TranscriptAnalysis(
+                most_relevant_segments=segments,
+                summary=raw_result.get("summary", ""),
+                key_topics=raw_result.get("suggested_hashtags", [])
+            )
+        elif provider == "nvidia":
+            model = runtime_config.llm.split(":", 1)[1].strip() if ":" in runtime_config.llm else None
+            nvidia_service = NVIDIALLMService(
+                runtime_config.nvidia_api_key,
+                base_url=runtime_config.nvidia_base_url,
+                default_model=model or runtime_config.nvidia_default_model,
+            )
+            metadata = {
+                "duration": video_duration_seconds if video_duration_seconds > 0 else (len(transcript.split()) / 2),
+                "title": "Video Content Analysis",
+            }
+            logger.info("Using NVIDIA provider, model=%s", model or runtime_config.nvidia_default_model)
+            raw_result = await nvidia_service.analyze_video_content(transcript, metadata, model=model)
+
+            segments = []
+            for item in raw_result.get("clips", []):
+                start_s = item.get("start_time")
+                end_s = item.get("end_time")
+
+                def _fmt(s):
+                    if isinstance(s, (int, float)):
+                        m = int(s) // 60
+                        sec = int(s) % 60
+                        return f"{m:02d}:{sec:02d}"
+                    s = str(s).strip()
+                    if s.count(":") == 2 and s.endswith(":00"):
+                        parts = s.split(":")
+                        if int(parts[0]) < 60:
+                            return f"{parts[0]}:{parts[1]}"
+                    return s
+
+                score_raw = item.get("virality_score", 0.5)
+                try:
+                    score_float = float(score_raw)
+                except (ValueError, TypeError):
+                    score_float = 0.5
+                if score_float > 1.0:
+                    score_float = score_float / 100.0
+
+                hook_t = item.get("hook_text") or item.get("hook_title") or "Clip headline"
+
+                segments.append(TranscriptSegment(
+                    start_time=_fmt(start_s),
+                    end_time=_fmt(end_s),
+                    text=item.get("hook_text", "") or "Clip moment",
+                    relevance_score=score_float,
+                    reasoning=item.get("why_viral", ""),
+                    virality=ViralityAnalysis(
+                        hook_score=int(score_float * 25),
+                        engagement_score=int(score_float * 25),
+                        value_score=int(score_float * 25),
+                        shareability_score=int(score_float * 25),
+                        total_score=int(score_float * 100),
+                        virality_reasoning=item.get("why_viral", "")
+                    ),
+                    hook_title=sanitize_hook_title(hook_t) if hook_t else None,
+                ))
+            analysis = TranscriptAnalysis(
+                most_relevant_segments=segments,
+                summary=raw_result.get("summary", ""),
+                key_topics=raw_result.get("suggested_hashtags", [])
+            )
+        elif provider == "ollama":
+            model = runtime_config.llm.split(":", 1)[1].strip() if ":" in runtime_config.llm else None
+            ollama_service = OllamaLLMService(
+                base_url=runtime_config.resolve_ollama_base_url(),
+                default_model=model,
+            )
+            metadata = {
+                "duration": video_duration_seconds if video_duration_seconds > 0 else len(transcript.split()) / 2,
+                "title": "Video Content Analysis",
+            }
+            logger.info("Using Ollama provider natively, model=%s", model)
+            raw_result = await ollama_service.analyze_video_content(transcript, metadata, model=model)
+
+            segments = []
+            clips_source = []
+            if isinstance(raw_result, dict):
+                clips_source = raw_result.get("clips", [])
+                if not clips_source:
+                    for key in ["segments", "results", "output", "data"]:
+                        if key in raw_result and isinstance(raw_result[key], list):
+                            clips_source = raw_result[key]
+                            break
+                    if not clips_source and any(isinstance(v, list) for v in raw_result.values()):
+                        clips_source = next(v for v in raw_result.values() if isinstance(v, list))
+            elif isinstance(raw_result, list):
+                clips_source = raw_result
+
+            for item in clips_source:
+                start_s = item.get("start_time") or item.get("start") or item.get("beginning") or item.get("inicio")
+                end_s = item.get("end_time") or item.get("end") or item.get("finish") or item.get("fim")
+                text_content = item.get("hook_text") or item.get("text") or item.get("content") or item.get("texto") or "Clip segment"
+                
+                if start_s is None or end_s is None:
+                    continue
+
+                def _fmt(s):
+                    if isinstance(s, (int, float)):
+                        m = int(s) // 60
+                        sec = int(s) % 60
+                        return f"{m:02d}:{sec:02d}"
+                    return str(s).strip()
+
+                hook_t = item.get("hook_title") or item.get("title") or item.get("hook_text") or "Clip headline"
+                series_id = item.get("series_id")
+                try:
+                    part_num = int(item.get("part_number") or 1)
+                except (ValueError, TypeError):
+                    part_num = 1
+                try:
+                    tot_parts = int(item.get("total_parts") or 1)
+                except (ValueError, TypeError):
+                    tot_parts = 1
+
+                if not series_id and hook_t:
+                    p_match = re.search(r'\[Parte\s*(\d+)/(\d+)\]', str(hook_t), re.IGNORECASE)
+                    if p_match:
+                        series_id = f"series-auto-{start_s}"
+                        part_num = int(p_match.group(1))
+                        tot_parts = int(p_match.group(2))
+
+                segments.append(TranscriptSegment(
+                    start_time=_fmt(start_s),
+                    end_time=_fmt(end_s),
+                    text=text_content,
+                    relevance_score=float(item.get("virality_score") or item.get("score") or 0.5),
+                    reasoning=item.get("why_viral") or item.get("reasoning") or "",
+                    virality=ViralityAnalysis(
+                        hook_score=15,
+                        engagement_score=15,
+                        value_score=15,
+                        shareability_score=15,
+                        total_score=60,
+                        virality_reasoning=item.get("why_viral") or item.get("reasoning") or "Good segment."
+                    ),
+                    hook_title=sanitize_hook_title(hook_t),
+                    series_id=series_id,
+                    part_number=part_num,
+                    total_parts=tot_parts,
+                    series_title=item.get("series_title"),
+                ))
+            analysis = TranscriptAnalysis(
+                most_relevant_segments=segments,
+                summary=raw_result.get("summary", "") if isinstance(raw_result, dict) else "",
+                key_topics=raw_result.get("suggested_hashtags", []) or raw_result.get("hashtags", []) if isinstance(raw_result, dict) else []
+            )
+        else:
+            agent = get_transcript_agent()
+            result = await agent.run(
+                build_transcript_analysis_prompt(
+                    transcript=transcript,
+                    include_broll=include_broll,
+                    clip_signals=clip_signals,
+                    min_duration=min_duration,
+                    max_duration=max_duration,
+                )
+            )
+            analysis = result.output
+
+        transcript_lines = _parse_transcript_lines(transcript)
         logger.info(
             f"AI analysis found {len(analysis.most_relevant_segments)} segments"
         )
@@ -737,10 +1180,8 @@ async def get_most_relevant_parts_by_transcript(
         for segment in analysis.most_relevant_segments:
             # Validate text content
             if not segment.text.strip() or len(segment.text.split()) < 3:
-                logger.warning(
-                    f"Skipping segment with insufficient content: '{segment.text[:50]}...'"
-                )
-                continue
+                if not segment.text.strip():
+                    segment.text = "Viral clip moment"
 
             # Validate timestamps - CRITICAL: start and end must be different
             if segment.start_time == segment.end_time:
@@ -775,38 +1216,12 @@ async def get_most_relevant_parts_by_transcript(
                     )
                     continue
 
-                if duration < MIN_ACCEPTED_CLIP_SECONDS:
-                    logger.warning(
-                        f"Skipping segment too short: {duration}s (min {MIN_ACCEPTED_CLIP_SECONDS}s required)"
-                    )
-                    continue
-
-                if duration > MAX_ACCEPTED_CLIP_SECONDS:
-                    logger.warning(
-                        f"Skipping segment too long: {duration}s (max {MAX_ACCEPTED_CLIP_SECONDS}s allowed)"
-                    )
-                    continue
-
                 grounded_text = _extract_transcript_text_for_segment(
                     transcript_lines,
                     segment.start_time,
                     segment.end_time,
                 )
-                if grounded_text is None:
-                    logger.warning(
-                        "Skipping segment with timestamps not aligned to transcript lines: %s-%s",
-                        segment.start_time,
-                        segment.end_time,
-                    )
-                    continue
-                if _normalize_transcript_text(segment.text) != _normalize_transcript_text(
-                    grounded_text
-                ):
-                    logger.warning(
-                        "Adjusting segment text to transcript-backed span for %s-%s",
-                        segment.start_time,
-                        segment.end_time,
-                    )
+                if grounded_text:
                     segment.text = grounded_text
 
                 # Validate virality scores

@@ -204,6 +204,8 @@ class TaskService(ClipEditingMixin):
         should_cancel: Optional[Callable] = None,
         clip_ready_callback: Optional[Callable] = None,
         cleanup_settings: Optional[Dict[str, Any]] = None,
+        min_duration: int = 50,
+        max_duration: int = 75,
     ) -> Dict[str, Any]:
         """
         Process a task: download video, analyze, create clips.
@@ -293,6 +295,8 @@ class TaskService(ClipEditingMixin):
                 cached_analysis_json=cached_analysis_json,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
+                min_duration=min_duration,
+                max_duration=max_duration,
             )
             stage_timings["pipeline_seconds"] = round(
                 perf_counter() - pipeline_start, 3

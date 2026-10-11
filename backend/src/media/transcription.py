@@ -356,11 +356,34 @@ def _get_transcript_with_assemblyai(
 
 
 def _get_transcript_with_whisper(video_path: Path, runtime_config) -> str:
-    """Get transcript using local Whisper with word-level timestamps."""
-    model_name = runtime_config.whisper_model
+    """Get transcript using local Whisper or Faster-Whisper with word-level timestamps."""
+    model_name = runtime_config.whisper_model or "small"
     logger.info("Starting Whisper transcription with model: %s", model_name)
-    whisper_result = transcribe_with_whisper(video_path, model_name)
+    
+    if getattr(runtime_config, "whisper_use_faster", True):
+        try:
+            from ..services.whisper_transcription import WhisperTranscriptionService
+            import asyncio
+            whisper_service = WhisperTranscriptionService(
+                model_size=model_name,
+                use_faster=True,
+                device=getattr(runtime_config, "whisper_device", "auto"),
+                compute_type=getattr(runtime_config, "whisper_compute_type", "int8"),
+            )
+            whisper_result = asyncio.run(whisper_service.transcribe(str(video_path)))
+            formatted_lines = format_transcript_for_analysis(whisper_result)
+            cache_transcript_data(video_path, whisper_result)
+            result = "\n".join(formatted_lines)
+            logger.info(
+                "Faster-Whisper transcript formatted: %d segments, %d chars",
+                len(formatted_lines),
+                len(result),
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"Faster-whisper failed, falling back to standard whisper: {e}")
 
+    whisper_result = transcribe_with_whisper(video_path, model_name)
     formatted_lines = format_transcript_for_analysis(whisper_result)
     cache_transcript_data(video_path, whisper_result)
 

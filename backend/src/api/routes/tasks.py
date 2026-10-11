@@ -140,6 +140,8 @@ def _merge_task_source_metadata(
     output_format: Any = None,
     add_subtitles: Any = None,
     cleanup_settings: Dict[str, Any] | None = None,
+    min_duration: Any = None,
+    max_duration: Any = None,
 ) -> Dict[str, Any]:
     merged = dict(existing or {})
 
@@ -153,6 +155,10 @@ def _merge_task_source_metadata(
         merged["add_subtitles"] = add_subtitles
     if cleanup_settings:
         merged.update(cleanup_settings)
+    if min_duration is not None:
+        merged["min_duration"] = min_duration
+    if max_duration is not None:
+        merged["max_duration"] = max_duration
 
     return merged
 
@@ -236,6 +242,7 @@ async def list_tasks(
 
 
 @router.post("/")
+@router.post("/create")
 async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Create a new task and enqueue it for processing.
@@ -269,6 +276,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     add_subtitles = data.get("add_subtitles", True)
     if not isinstance(add_subtitles, bool):
         add_subtitles = True
+    min_duration = int(data.get("min_duration") or 50)
+    max_duration = int(data.get("max_duration") or 75)
     cleanup_settings = normalize_clip_cleanup_settings(
         data.get("cut_long_pauses"),
         data.get("pause_threshold_ms"),
@@ -319,6 +328,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             output_format,
             add_subtitles,
             cleanup_settings,
+            min_duration,
+            max_duration,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
@@ -331,6 +342,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                 output_format=output_format,
                 add_subtitles=add_subtitles,
                 cleanup_settings=cleanup_settings,
+                min_duration=min_duration,
+                max_duration=max_duration,
             ),
         )
 

@@ -9,7 +9,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import hashlib
 import json
 import os
@@ -121,11 +124,13 @@ def atomic_json(path: Path, value: dict):
 def editor_lock(directory: Path):
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".lock").open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        if fcntl:
+            fcntl.flock(handle, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            if fcntl:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 class RevisionConflict(ValueError):
